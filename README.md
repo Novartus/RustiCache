@@ -142,27 +142,35 @@ sequenceDiagram
 To achieve high throughput with minimal contention:
 
 ```mermaid
-graph LR
-    subgraph Concurrency["Request Handling & Storage Concurrency"]
-        direction TB
-        ClientReq["Incoming Client Streams\n(Tokio Tasks)"]
+flowchart LR
+    subgraph Ingress["Ingress & Request Handlers"]
+        ClientReq["Incoming Client Tasks<br/>(Tokio Async Streams)"]
         ReplReq["Replication Stream Task"]
-        
-        subgraph Sharding["Sharded Partitions (e.g. 64 or 128 Shards)"]
-            S0["Shard 0\nRwLock<HashMap<Key, ValueEntry>>"]
-            S1["Shard 1\nRwLock<HashMap<Key, ValueEntry>>"]
-            S2["Shard 2\nRwLock<HashMap<Key, ValueEntry>>"]
-            Sn["Shard N...\nRwLock<HashMap<Key, ValueEntry>>"]
-        end
-
-        subgraph Expiry["Expiry Manager"]
-            Wheel["Active Expiry Task\n(Sampling & Eviction)"]
-        end
     end
 
-    ClientReq -->|Hash(Key) % N| Sharding
-    ReplReq -->|Hash(Key) % N| Sharding
-    Wheel -.->|Periodic purge of expired keys| Sharding
+    Router{"Hash Router<br/>hash & mask"}
+
+    subgraph Sharding["Sharded Partitions (64 or 128 Shards)"]
+        S0["Shard 0<br/>RwLock HashMap"]
+        S1["Shard 1<br/>RwLock HashMap"]
+        S2["Shard 2<br/>RwLock HashMap"]
+        Sn["Shard N...<br/>RwLock HashMap"]
+    end
+
+    subgraph Expiry["Expiry Manager"]
+        Wheel["Active TTL Eviction Task"]
+    end
+
+    ClientReq --> Router
+    ReplReq --> Router
+
+    Router --> S0
+    Router --> S1
+    Router --> S2
+    Router --> Sn
+
+    Wheel -.->|"Periodic Key Eviction"| S0
+    Wheel -.->|"Periodic Key Eviction"| Sn
 ```
 
 ### Storage Entry Structure
