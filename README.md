@@ -210,8 +210,91 @@ RustiCache/
 
 ## 5. Technology Stack & Crates
 
-- **Runtime**: [`tokio`](https://crates.io/crates/tokio) (Multi-threaded async executor)
+- **Runtime**: [`tokio`](https://crates.io/crates/tokio) (Configurable multi-threaded runtime with dedicated worker pools)
 - **Networking & Framing**: [`tokio-util`](https://crates.io/crates/tokio-util) (`codec` for RESP framing), [`bytes`](https://crates.io/crates/bytes) (Zero-copy byte buffers)
-- **Concurrency**: [`parking_lot`](https://crates.io/crates/parking_lot) or [`dashmap`](https://crates.io/crates/dashmap)
-- **CLI & Config**: [`clap`](https://crates.io/crates/clap)
+- **Concurrency**: [`parking_lot`](https://crates.io/crates/parking_lot) with power-of-two bitmask sharded hash partitions
+- **CLI & Config**: [`clap`](https://crates.io/crates/clap) with environment variable bindings
 - **Observability**: [`tracing`](https://crates.io/crates/tracing) & [`tracing-subscriber`](https://crates.io/crates/tracing-subscriber)
+
+---
+
+## 6. Enterprise Standards & Features
+
+1. **Security & Authentication**:
+   - **`AUTH` & `requirepass`**: Supports password-protected client connections. Unauthenticated commands are blocked with `-NOAUTH Authentication required.`.
+   - **`masterauth`**: Automatic upstream master authentication during replica handshake.
+   - **Connection Limiting**: Bounded concurrent connections (`RUSTICACHE_MAX_CONNECTIONS`) via an atomic semaphore to prevent exhaustion attacks.
+   - **Buffer & Payload Guards**: Maximum single frame size limit (`RUSTICACHE_MAX_PAYLOAD_SIZE_BYTES`) preventing memory exhaustion attacks.
+   - **`TCP_NODELAY`**: Enabled by default to disable Nagle's algorithm and provide minimal socket latency.
+
+2. **Concurrency & Multiprocessing**:
+   - **Multi-Threaded Runtime**: Explicit worker pool control (`RUSTICACHE_WORKER_THREADS`, 0 for auto-core detection) via `tokio::runtime::Builder::new_multi_thread()`.
+   - **Power-of-Two Bitmask Sharding**: Scalable storage partitioning (`RUSTICACHE_SHARD_COUNT`) utilizing fast bitwise masking `(hash & (N - 1))` instead of modulo arithmetic.
+
+3. **Memory Management & Eviction**:
+   - **LRU Memory Capacity**: Configurable memory threshold (`RUSTICACHE_MAXMEMORY_BYTES`). When memory limit is reached, least recently used keys are evicted.
+   - **Dual-Tier Expiry**: Passive/lazy cleanup on `GET` plus background active eviction sampling.
+
+4. **Lifecycle & Reliability**:
+   - **Graceful Shutdown**: Traps `SIGINT`/`Ctrl+C` and broadcasts coordinated termination to active client connections and background replication loops.
+
+---
+
+## 7. Configuration & Environment Variables
+
+RustiCache supports configuration via both environment variables (or a local `.env` file) and CLI flags. CLI flags take precedence over `.env` values.
+
+### Setting up `.env`:
+```bash
+cp .env.example .env
+```
+
+### Supported Configuration Options:
+
+| Environment Variable | CLI Flag | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `RUSTICACHE_PORT` | `-p, --port` | `6379` | Port to bind and listen on |
+| `RUSTICACHE_HOST` | `--host` | `0.0.0.0` | Network interface / IP to bind to |
+| `RUSTICACHE_REQUIREPASS` | `--requirepass` | *None* | Require clients to authenticate with `AUTH <password>` |
+| `RUSTICACHE_MASTERAUTH` | `--masterauth` | *None* | Password for authenticating with master when running as replica |
+| `RUSTICACHE_MAX_CONNECTIONS` | `--max-connections` | `10000` | Maximum concurrent client connections |
+| `RUSTICACHE_MAX_PAYLOAD_SIZE_BYTES`| `--max-payload-size` | `536870912` (512MB) | Maximum payload size per request (anti-DoS guard) |
+| `RUSTICACHE_TCP_NODELAY` | `--tcp-nodelay` | `true` | Enable TCP_NODELAY socket optimization |
+| `RUSTICACHE_WORKER_THREADS` | `--worker-threads` | `0` (auto) | Tokio multi-thread worker count (0 = auto-detect CPU cores) |
+| `RUSTICACHE_SHARD_COUNT` | `--shard-count` | `128` | Number of concurrent storage shards (power of 2) |
+| `RUSTICACHE_MAXMEMORY_BYTES` | `--max-memory-bytes` | `0` (unlimited) | Max memory in bytes before LRU eviction triggers |
+| `RUSTICACHE_TTL_INTERVAL_MS` | `--ttl-interval-ms` | `100` | Background active TTL eviction frequency in ms |
+| `RUSTICACHE_TTL_SAMPLE_SIZE` | `--ttl-sample-size` | `20` | Number of keys sampled per shard during active eviction |
+| `RUSTICACHE_REPLICAOF` | `--replicaof <host> <port>` | *None* | Set to `"<master_host> <master_port>"` to start in replica mode |
+| `RUST_LOG` | *N/A* | `info` | Logging verbosity (`error`, `warn`, `info`, `debug`, `trace`) |
+
+---
+
+## 8. Running RustiCache
+
+### Standalone / Master Mode:
+```bash
+# Using .env defaults (port 6379)
+cargo run
+
+# Or specifying port and password via CLI flags
+cargo run -- --port 6379 --requirepass "mypassword"
+```
+
+### Replica Mode:
+```bash
+# Via CLI flag (syncing from master on port 6379 with authentication):
+cargo run -- --port 6380 --replicaof 127.0.0.1 6379 --masterauth "mypassword"
+
+# Or via .env:
+# RUSTICACHE_PORT=6380
+# RUSTICACHE_REPLICAOF="127.0.0.1 6379"
+# RUSTICACHE_MASTERAUTH="mypassword"
+cargo run
+```
+
+### Running Tests:
+```bash
+cargo test
+```
+
