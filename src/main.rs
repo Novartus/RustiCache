@@ -5,6 +5,7 @@ use std::time::Duration;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+mod cluster;
 mod commands;
 mod config;
 mod connection;
@@ -79,6 +80,30 @@ struct Cli {
     /// Act as replica specified via environment (e.g. "127.0.0.1 6379")
     #[arg(long, env = "RUSTICACHE_REPLICAOF")]
     replicaof_env: Option<String>,
+
+    /// Enable Redis Cluster mode
+    #[arg(long, env = "RUSTICACHE_CLUSTER_ENABLED", default_value_t = false)]
+    cluster_enabled: bool,
+
+    /// Unique cluster node ID (40 hex characters)
+    #[arg(long, env = "RUSTICACHE_CLUSTER_NODE_ID")]
+    cluster_node_id: Option<String>,
+
+    /// Announced IP for cluster redirection
+    #[arg(long, env = "RUSTICACHE_CLUSTER_ANNOUNCE_IP")]
+    cluster_announce_ip: Option<String>,
+
+    /// Announced client port for cluster redirection
+    #[arg(long, env = "RUSTICACHE_CLUSTER_ANNOUNCE_PORT")]
+    cluster_announce_port: Option<u16>,
+
+    /// Announced cluster bus port
+    #[arg(long, env = "RUSTICACHE_CLUSTER_ANNOUNCE_BUS_PORT")]
+    cluster_announce_bus_port: Option<u16>,
+
+    /// Slots assigned to this cluster node (e.g. "0-5460" or "0-16383")
+    #[arg(long, env = "RUSTICACHE_CLUSTER_SLOTS")]
+    cluster_slots: Option<String>,
 }
 
 fn load_dotenv() {
@@ -140,6 +165,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ReplicationState::new_master(None)
     };
 
+    let announce_ip = cli.cluster_announce_ip.unwrap_or_else(|| {
+        if cli.host == "0.0.0.0" {
+            "127.0.0.1".to_string()
+        } else {
+            cli.host.clone()
+        }
+    });
+    let announce_port = cli.cluster_announce_port.unwrap_or(cli.port);
+    let announce_bus_port = cli.cluster_announce_bus_port.unwrap_or(announce_port + 10000);
+
     let config = ServerConfig {
         host: cli.host,
         port: cli.port,
@@ -154,6 +189,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ttl_interval: Duration::from_millis(cli.ttl_interval_ms),
         ttl_sample_size: cli.ttl_sample_size,
         replicaof: replica_parsed,
+        cluster_enabled: cli.cluster_enabled,
+        cluster_node_id: cli.cluster_node_id,
+        cluster_announce_ip: announce_ip,
+        cluster_announce_port: announce_port,
+        cluster_announce_bus_port: announce_bus_port,
+        cluster_slots: cli.cluster_slots,
     };
 
     // Configure multi-threaded Tokio runtime according to enterprise settings

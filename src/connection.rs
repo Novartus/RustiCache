@@ -6,6 +6,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 
+use crate::cluster::{key_slot, ClusterManager};
 use crate::commands::Command;
 use crate::protocol::Value;
 use crate::replication::rdb::get_empty_rdb_bytes;
@@ -35,6 +36,7 @@ impl Connection {
         max_payload_size: usize,
         tcp_nodelay: bool,
         mut shutdown_rx: broadcast::Receiver<()>,
+        cluster_manager: Option<ClusterManager>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         debug!("Accepted client connection from {}", self.addr);
 
@@ -112,12 +114,45 @@ impl Connection {
                                 break;
                             }
                             Ok(cmd) => {
+                                // Check for cluster slot redirection if cluster mode is active
+                                if let Some(ref cluster) = cluster_manager {
+                                    if let Some(target_key) = cmd.target_key() {
+                                        // Only redirect if client is authenticated (or no auth required)
+                                        if is_authenticated {
+                                            let slot = key_slot(target_key.as_bytes());
+                                            let redirect = {
+                                                let topo = cluster.read();
+                                                if !topo.owns_slot(slot) {
+                                                    Some(topo.get_node_for_slot(slot))
+                                                } else {
+                                                    None
+                                                }
+                                            };
+
+                                            if let Some(target_opt) = redirect {
+                                                if let Some(owner) = target_opt {
+                                                    let moved_resp = format!("-MOVED {} {}\r\n", slot, owner.endpoint());
+                                                    self.stream.write_all(moved_resp.as_bytes()).await?;
+                                                    self.stream.flush().await?;
+                                                    continue;
+                                                } else {
+                                                    let down_resp = b"-CLUSTERDOWN The cluster is down\r\n";
+                                                    self.stream.write_all(down_resp).await?;
+                                                    self.stream.flush().await?;
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 if let Some(reply) = cmd.execute(
                                     &db,
                                     &repl_state,
                                     Some(&raw_cmd),
                                     requirepass.as_deref(),
                                     &mut is_authenticated,
+                                    cluster_manager.as_ref(),
                                 ) {
                                     let mut out = BytesMut::new();
                                     reply.serialize(&mut out);

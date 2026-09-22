@@ -1,10 +1,22 @@
 use bytes::{Bytes, BytesMut};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use crate::cluster::ClusterManager;
 use crate::protocol::Value;
 use crate::replication::ReplicationState;
 use crate::storage::Db;
+
+#[derive(Debug, Clone)]
+pub enum ClusterSubcommand {
+    KeySlot(String),
+    Info,
+    Nodes,
+    Slots,
+    Meet { ip: String, port: u16 },
+    AddSlots(Vec<u16>),
+}
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -27,11 +39,22 @@ pub enum Command {
         username: Option<String>,
         password: String,
     },
+    Cluster(ClusterSubcommand),
     Quit,
     Command,
 }
 
 impl Command {
+    pub fn target_key(&self) -> Option<&str> {
+        match self {
+            Command::Get(key) => Some(key),
+            Command::Set { key, .. } => Some(key),
+            Command::Del(keys) => keys.first().map(|s| s.as_str()),
+            Command::Exists(keys) => keys.first().map(|s| s.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn from_value(val: &Value) -> Result<Command, String> {
         let items = match val {
             Value::Array(Some(items)) => items,
@@ -168,6 +191,52 @@ impl Command {
                     Err("ERR wrong number of arguments for 'auth' command".to_string())
                 }
             }
+            "CLUSTER" => {
+                if items.len() < 2 {
+                    return Err("ERR wrong number of arguments for 'cluster' command".to_string());
+                }
+                let sub = items[1]
+                    .as_str()
+                    .ok_or_else(|| "Subcommand must be string".to_string())?
+                    .to_ascii_uppercase();
+
+                match sub.as_str() {
+                    "KEYSLOT" => {
+                        if items.len() < 3 {
+                            return Err("ERR wrong number of arguments for 'cluster keyslot' command".to_string());
+                        }
+                        let key = items[2].as_str().unwrap_or("").to_string();
+                        Ok(Command::Cluster(ClusterSubcommand::KeySlot(key)))
+                    }
+                    "INFO" => Ok(Command::Cluster(ClusterSubcommand::Info)),
+                    "NODES" => Ok(Command::Cluster(ClusterSubcommand::Nodes)),
+                    "SLOTS" => Ok(Command::Cluster(ClusterSubcommand::Slots)),
+                    "MEET" => {
+                        if items.len() < 4 {
+                            return Err("ERR wrong number of arguments for 'cluster meet' command".to_string());
+                        }
+                        let ip = items[2].as_str().unwrap_or("127.0.0.1").to_string();
+                        let port = items[3]
+                            .as_str()
+                            .and_then(|s| s.parse::<u16>().ok())
+                            .ok_or_else(|| "Invalid port for 'cluster meet'".to_string())?;
+                        Ok(Command::Cluster(ClusterSubcommand::Meet { ip, port }))
+                    }
+                    "ADDSLOTS" => {
+                        if items.len() < 3 {
+                            return Err("ERR wrong number of arguments for 'cluster addslots' command".to_string());
+                        }
+                        let mut slots = Vec::new();
+                        for item in &items[2..] {
+                            let slot_str = item.as_str().ok_or_else(|| "Invalid slot integer".to_string())?;
+                            let slot = slot_str.parse::<u16>().map_err(|_| "Invalid slot integer".to_string())?;
+                            slots.push(slot);
+                        }
+                        Ok(Command::Cluster(ClusterSubcommand::AddSlots(slots)))
+                    }
+                    other => Err(format!("ERR unknown cluster subcommand '{}'", other)),
+                }
+            }
             "QUIT" => Ok(Command::Quit),
             "COMMAND" => Ok(Command::Command),
             other => Err(format!("unknown command '{}'", other)),
@@ -181,6 +250,7 @@ impl Command {
         raw_cmd: Option<&BytesMut>,
         requirepass: Option<&str>,
         is_authenticated: &mut bool,
+        cluster_manager: Option<&ClusterManager>,
     ) -> Option<Value> {
         // Enforce AUTH if requirepass is set
         if let Some(pass) = requirepass {
@@ -204,7 +274,6 @@ impl Command {
 
         match self {
             Command::Auth { .. } => {
-                // If no requirepass is set, AUTH always succeeds
                 *is_authenticated = true;
                 Some(Value::ok())
             }
@@ -225,7 +294,6 @@ impl Command {
                 let expires_at = px_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
                 db.set(key.clone(), value.clone(), expires_at);
 
-                // Propagate write commands to downstream replicas if master
                 if !repl_state.is_replica() {
                     if let Some(raw) = raw_cmd {
                         repl_state.propagate_downstream(raw.clone().freeze());
@@ -287,6 +355,56 @@ impl Command {
             Command::Psync { .. } => {
                 let fullresync = format!("FULLRESYNC {} 0", repl_state.get_replid());
                 Some(Value::SimpleString(fullresync))
+            }
+            Command::Cluster(subcmd) => {
+                if let Some(cluster) = cluster_manager {
+                    match subcmd {
+                        ClusterSubcommand::KeySlot(k) => {
+                            let slot = crate::cluster::key_slot(k.as_bytes());
+                            Some(Value::Integer(slot as i64))
+                        }
+                        ClusterSubcommand::Info => {
+                            let info = cluster.read().format_cluster_info();
+                            Some(Value::string(info))
+                        }
+                        ClusterSubcommand::Nodes => {
+                            let nodes = cluster.read().format_cluster_nodes();
+                            Some(Value::string(nodes))
+                        }
+                        ClusterSubcommand::Slots => {
+                            Some(cluster.read().format_cluster_slots())
+                        }
+                        ClusterSubcommand::Meet { ip, port } => {
+                            let mut h = DefaultHasher::new();
+                            format!("{}:{}", ip, port).hash(&mut h);
+                            let dummy_id = format!("{:040x}", h.finish());
+                            let peer = crate::cluster::ClusterNode::new(
+                                dummy_id,
+                                ip.clone(),
+                                *port,
+                                *port + 10000,
+                                false,
+                                true,
+                            );
+                            cluster.write().add_node(peer);
+                            Some(Value::ok())
+                        }
+                        ClusterSubcommand::AddSlots(slots) => {
+                            let mut topo = cluster.write();
+                            if let Some(me) = topo.myself() {
+                                let id = me.id.clone();
+                                for &s in slots {
+                                    if let Err(e) = topo.add_slots_range(&id, s, s) {
+                                        return Some(Value::error(e));
+                                    }
+                                }
+                            }
+                            Some(Value::ok())
+                        }
+                    }
+                } else {
+                    Some(Value::error("ERR This instance has cluster support disabled"))
+                }
             }
             Command::Command => Some(Value::Array(Some(vec![]))),
         }

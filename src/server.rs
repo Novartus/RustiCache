@@ -1,9 +1,11 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Semaphore};
 use tracing::{error, info, warn};
 
+use crate::cluster::{ClusterManager, ClusterNode, ClusterTopology};
 use crate::config::ServerConfig;
 use crate::connection::Connection;
 use crate::replication::{run_replica_loop, ReplicationState, ServerRole};
@@ -14,6 +16,7 @@ pub struct Server {
     config: ServerConfig,
     db: Db,
     repl_state: ReplicationState,
+    cluster_manager: Option<ClusterManager>,
 }
 
 impl Server {
@@ -26,10 +29,42 @@ impl Server {
 
     pub fn with_server_config(config: ServerConfig, repl_state: ReplicationState) -> Self {
         let db = Db::with_config(config.shard_count, config.max_memory_bytes);
+
+        let cluster_manager = if config.cluster_enabled {
+            let node_id = config.cluster_node_id.clone().unwrap_or_else(|| {
+                let mut h = DefaultHasher::new();
+                format!("{}:{}", config.cluster_announce_ip, config.cluster_announce_port).hash(&mut h);
+                format!("{:040x}", h.finish())
+            });
+
+            let myself = ClusterNode::new(
+                node_id.clone(),
+                config.cluster_announce_ip.clone(),
+                config.cluster_announce_port,
+                config.cluster_announce_bus_port,
+                true,
+                true,
+            );
+            let mut topo = ClusterTopology::new(myself);
+
+            if let Some(ref slots_spec) = config.cluster_slots {
+                if let Err(e) = topo.parse_and_assign_slots(&node_id, slots_spec) {
+                    warn!("Failed to parse cluster slots specification '{}': {}", slots_spec, e);
+                }
+            } else {
+                let _ = topo.add_slots_range(&node_id, 0, 16383);
+            }
+
+            Some(Arc::new(parking_lot::RwLock::new(topo)))
+        } else {
+            None
+        };
+
         Self {
             config,
             db,
             repl_state,
+            cluster_manager,
         }
     }
 
@@ -41,6 +76,11 @@ impl Server {
     #[allow(dead_code)]
     pub fn repl_state(&self) -> &ReplicationState {
         &self.repl_state
+    }
+
+    #[allow(dead_code)]
+    pub fn cluster_manager(&self) -> Option<ClusterManager> {
+        self.cluster_manager.clone()
     }
 
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
@@ -62,8 +102,11 @@ impl Server {
         let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port).parse()?;
         let listener = TcpListener::bind(addr).await?;
         info!(
-            "RustiCache enterprise server listening on {} [Max Conn: {}, Shards: {}, Max Mem: {} bytes]",
-            addr, self.config.max_connections, self.config.shard_count, self.config.max_memory_bytes
+            "RustiCache enterprise server listening on {} [Max Conn: {}, Shards: {}, Cluster: {}]",
+            addr,
+            self.config.max_connections,
+            self.config.shard_count,
+            if self.config.cluster_enabled { "ENABLED" } else { "DISABLED" }
         );
 
         // Spawn background TTL eviction task
@@ -97,6 +140,7 @@ impl Server {
         let requirepass_arc = self.config.requirepass.clone().map(Arc::from);
         let max_payload = self.config.max_payload_size;
         let nodelay = self.config.tcp_nodelay;
+        let cluster_mgr = self.cluster_manager.clone();
 
         loop {
             tokio::select! {
@@ -121,6 +165,7 @@ impl Server {
                             let requirepass = requirepass_arc.clone();
                             let conn = Connection::new(stream, client_addr);
                             let client_rx = client_shutdown_tx.subscribe();
+                            let cluster_for_conn = cluster_mgr.clone();
 
                             tokio::spawn(async move {
                                 let _permit = permit;
@@ -131,6 +176,7 @@ impl Server {
                                     max_payload,
                                     nodelay,
                                     client_rx,
+                                    cluster_for_conn,
                                 ).await {
                                     error!("Connection error with {}: {}", client_addr, e);
                                 }

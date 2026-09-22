@@ -16,6 +16,14 @@ pub struct ServerConfig {
     pub ttl_sample_size: usize,
     #[allow(dead_code)]
     pub replicaof: Option<(String, u16)>,
+
+    // Cluster configuration
+    pub cluster_enabled: bool,
+    pub cluster_node_id: Option<String>,
+    pub cluster_announce_ip: String,
+    pub cluster_announce_port: u16,
+    pub cluster_announce_bus_port: u16,
+    pub cluster_slots: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -34,6 +42,12 @@ impl Default for ServerConfig {
             ttl_interval: Duration::from_millis(100),
             ttl_sample_size: 20,
             replicaof: None,
+            cluster_enabled: false,
+            cluster_node_id: None,
+            cluster_announce_ip: "127.0.0.1".to_string(),
+            cluster_announce_port: 6379,
+            cluster_announce_bus_port: 16379,
+            cluster_slots: None,
         }
     }
 }

@@ -142,7 +142,7 @@ pub async fn run_replica_loop(
                         }
                         Ok(cmd) => {
                             let mut auth_ok = true;
-                            cmd.execute(&db, &repl_state, None, None, &mut auth_ok);
+                            cmd.execute(&db, &repl_state, None, None, &mut auth_ok, None);
                         }
                         Err(e) => {
                             warn!("Unknown command in replication stream: {}", e);

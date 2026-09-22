@@ -10,12 +10,12 @@ fn test_ping_command() {
 
     let ping_val = Value::Array(Some(vec![Value::string("PING")]));
     let cmd = Command::from_value(&ping_val).unwrap();
-    let res = cmd.execute(&db, &repl, None, None, &mut auth).unwrap();
+    let res = cmd.execute(&db, &repl, None, None, &mut auth, None).unwrap();
     assert_eq!(res, Value::pong());
 
     let ping_msg = Value::Array(Some(vec![Value::string("PING"), Value::string("hello")]));
     let cmd_msg = Command::from_value(&ping_msg).unwrap();
-    let res_msg = cmd_msg.execute(&db, &repl, None, None, &mut auth).unwrap();
+    let res_msg = cmd_msg.execute(&db, &repl, None, None, &mut auth, None).unwrap();
     assert_eq!(res_msg, Value::string("hello"));
 }
 
@@ -27,7 +27,7 @@ fn test_echo_command() {
 
     let echo_val = Value::Array(Some(vec![Value::string("ECHO"), Value::string("test message")]));
     let cmd = Command::from_value(&echo_val).unwrap();
-    let res = cmd.execute(&db, &repl, None, None, &mut auth).unwrap();
+    let res = cmd.execute(&db, &repl, None, None, &mut auth, None).unwrap();
     assert_eq!(res, Value::string("test message"));
 }
 
@@ -44,19 +44,19 @@ fn test_set_and_get_command() {
         Value::string("myval"),
     ]));
     let cmd = Command::from_value(&set_val).unwrap();
-    let res = cmd.execute(&db, &repl, None, None, &mut auth).unwrap();
+    let res = cmd.execute(&db, &repl, None, None, &mut auth, None).unwrap();
     assert_eq!(res, Value::ok());
 
     // GET key
     let get_val = Value::Array(Some(vec![Value::string("GET"), Value::string("mykey")]));
     let cmd_get = Command::from_value(&get_val).unwrap();
-    let res_get = cmd_get.execute(&db, &repl, None, None, &mut auth).unwrap();
+    let res_get = cmd_get.execute(&db, &repl, None, None, &mut auth, None).unwrap();
     assert_eq!(res_get, Value::BulkString(Some(Bytes::from_static(b"myval"))));
 
     // GET non-existent
     let get_missing = Value::Array(Some(vec![Value::string("GET"), Value::string("missing")]));
     let cmd_missing = Command::from_value(&get_missing).unwrap();
-    let res_missing = cmd_missing.execute(&db, &repl, None, None, &mut auth).unwrap();
+    let res_missing = cmd_missing.execute(&db, &repl, None, None, &mut auth, None).unwrap();
     assert_eq!(res_missing, Value::null_bulk());
 }
 
@@ -68,7 +68,7 @@ fn test_info_replication_command() {
 
     let info_val = Value::Array(Some(vec![Value::string("INFO"), Value::string("replication")]));
     let cmd = Command::from_value(&info_val).unwrap();
-    let res = cmd.execute(&db, &master_repl, None, None, &mut auth).unwrap();
+    let res = cmd.execute(&db, &master_repl, None, None, &mut auth, None).unwrap();
 
     let info_str = res.as_str().unwrap();
     assert!(info_str.contains("role:master"));
@@ -77,7 +77,7 @@ fn test_info_replication_command() {
 
     // Test replica info output
     let replica_repl = ReplicationState::new_replica("127.0.0.1".to_string(), 6379);
-    let res_replica = cmd.execute(&db, &replica_repl, None, None, &mut auth).unwrap();
+    let res_replica = cmd.execute(&db, &replica_repl, None, None, &mut auth, None).unwrap();
     let replica_str = res_replica.as_str().unwrap();
     assert!(replica_str.contains("role:slave"));
     assert!(replica_str.contains("master_host:127.0.0.1"));
@@ -97,7 +97,7 @@ fn test_replconf_getack_command() {
         Value::string("*"),
     ]));
     let cmd = Command::from_value(&getack_val).unwrap();
-    let res = cmd.execute(&db, &repl, None, None, &mut auth).unwrap();
+    let res = cmd.execute(&db, &repl, None, None, &mut auth, None).unwrap();
 
     assert_eq!(
         res,
@@ -123,7 +123,7 @@ fn test_auth_security() {
         Value::string("v"),
     ]));
     let cmd_set = Command::from_value(&set_val).unwrap();
-    let res_err = cmd_set.execute(&db, &repl, None, requirepass, &mut authenticated).unwrap();
+    let res_err = cmd_set.execute(&db, &repl, None, requirepass, &mut authenticated, None).unwrap();
     assert_eq!(res_err, Value::error("NOAUTH Authentication required."));
 
     // 2. AUTH with wrong password must fail
@@ -132,7 +132,7 @@ fn test_auth_security() {
         Value::string("wrongpass"),
     ]));
     let cmd_auth_wrong = Command::from_value(&auth_wrong).unwrap();
-    let res_wrong = cmd_auth_wrong.execute(&db, &repl, None, requirepass, &mut authenticated).unwrap();
+    let res_wrong = cmd_auth_wrong.execute(&db, &repl, None, requirepass, &mut authenticated, None).unwrap();
     assert_eq!(res_wrong, Value::error("WRONGPASS invalid username-password pair or user is disabled."));
     assert!(!authenticated);
 
@@ -142,11 +142,11 @@ fn test_auth_security() {
         Value::string("secret123"),
     ]));
     let cmd_auth_ok = Command::from_value(&auth_correct).unwrap();
-    let res_ok = cmd_auth_ok.execute(&db, &repl, None, requirepass, &mut authenticated).unwrap();
+    let res_ok = cmd_auth_ok.execute(&db, &repl, None, requirepass, &mut authenticated, None).unwrap();
     assert_eq!(res_ok, Value::ok());
     assert!(authenticated);
 
     // 4. Now SET succeeds
-    let res_set_ok = cmd_set.execute(&db, &repl, None, requirepass, &mut authenticated).unwrap();
+    let res_set_ok = cmd_set.execute(&db, &repl, None, requirepass, &mut authenticated, None).unwrap();
     assert_eq!(res_set_ok, Value::ok());
 }
